@@ -1,0 +1,5 @@
+{
+  "_comment": "Control de acceso por documento: qué roles pueden recuperar cada fuente.",
+  "NIST_CSF_2.0_es.pdf": ["analista", "compliance", "crisis", "admin"],
+  "protocolo_crisis_interno.md": ["crisis", "admin"]
+}
