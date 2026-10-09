@@ -1,15 +1,19 @@
-"""Grafo del agente (LangGraph): guardrail → recuperación con ACL → generación → verificación de citas."""
+"""Grafo del agente (LangGraph): guardrail → recuperación con ACL → generación → verificación de citas
+→ (si se propone una acción) permisos de herramienta → aprobación humana → ejecución."""
 import operator
 from typing import Annotated, Callable, TypedDict
 
 from langchain_core.documents import Document
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from . import config
 from .citations import keep_valid_citations, validate_answer
 from .guardrails import detect_injection, redact_pii, strip_injected_lines
 from .schemas import Answer
+from .tools import can_use_tool, create_ticket
 from .tracing import estimate_cost, span
 
 HISTORY_TURNS = 3
@@ -25,6 +29,8 @@ class AgentState(TypedDict, total=False):
     answer: Answer | None
     attempts: int
     citation_errors: list[str]
+    action_status: str | None  # pendiente_aprobacion | denegada_por_permisos | aprobada | rechazada | ejecutada
+    ticket: dict | None
     history: Annotated[list[dict], operator.add]  # memoria conversacional por thread_id
 
 
@@ -37,7 +43,7 @@ def build_graph(retriever: Callable[[str, str], list[Document]], answer_fn: Call
             extra.update(blocked=bool(pattern), pii_found=pii)
             # Reinicia los campos por turno: el checkpointer conserva el estado entre turnos.
             return {"safe_question": safe_q, "blocked_reason": pattern, "docs": [], "quarantined": 0,
-                    "answer": None, "attempts": 0, "citation_errors": []}
+                    "answer": None, "attempts": 0, "citation_errors": [], "action_status": None, "ticket": None}
 
     def retrieve(state: AgentState):
         with span("retrieve", role=state["role"]) as extra:
@@ -70,16 +76,46 @@ def build_graph(retriever: Callable[[str, str], list[Document]], answer_fn: Call
     def finalize(state: AgentState):
         with span("finalize") as extra:
             answer = state["answer"].model_copy()
+            action = answer.proposed_action
             if state["citation_errors"]:
                 # Calibración: lo que no se puede respaldar con fuentes no se entrega como seguro.
                 answer.citations = keep_valid_citations(answer, state["docs"])
                 answer.confidence = "baja"
                 if not answer.citations:
                     answer = Answer(answer="No pude respaldar una respuesta con citas verificables en los documentos.",
-                                    answerable=False, confidence="baja")
+                                    answerable=False, confidence="baja", proposed_action=action)
             answer.answer, pii = redact_pii(answer.answer)
+            if answer.proposed_action:
+                p = answer.proposed_action.model_copy()
+                p.title, _ = redact_pii(p.title)
+                p.description, _ = redact_pii(p.description)
+                answer.proposed_action = p
             extra.update(answerable=answer.answerable, confidence=answer.confidence, pii_redacted=pii)
             return {"answer": answer, "history": [{"question": state["safe_question"], "answer": answer.answer}]}
+
+    def authorize_action(state: AgentState):
+        # Permisos de herramienta: que el modelo proponga una acción no implica que el usuario pueda ejecutarla.
+        with span("authorize_action", role=state["role"]) as extra:
+            allowed = can_use_tool("crear_ticket", state["role"])
+            extra.update(allowed=allowed)
+            return {"action_status": "pendiente_aprobacion" if allowed else "denegada_por_permisos"}
+
+    def human_review(state: AgentState):
+        # El grafo se pausa aquí y queda persistido en el checkpointer hasta que una persona decide.
+        decision = interrupt({"tool": "crear_ticket", "role": state["role"],
+                              "proposal": state["answer"].proposed_action.model_dump()})
+        approved = bool(decision.get("approved"))
+        with span("human_review", approved=approved, reviewer=decision.get("reviewer", "revisor")):
+            return {"action_status": "aprobada" if approved else "rechazada",
+                    "ticket": {"approved_by": decision.get("reviewer", "revisor")} if approved else None}
+
+    def execute_action(state: AgentState, config: RunnableConfig):
+        with span("execute_action") as extra:
+            ticket = create_ticket(state["answer"].proposed_action, state["role"],
+                                   approved_by=state["ticket"]["approved_by"],
+                                   thread_id=config["configurable"]["thread_id"])
+            extra.update(ticket_id=ticket["id"])
+            return {"action_status": "ejecutada", "ticket": ticket}
 
     def refuse(state: AgentState):
         with span("refuse", pattern=state["blocked_reason"]):
@@ -105,20 +141,55 @@ def build_graph(retriever: Callable[[str, str], list[Document]], answer_fn: Call
             return "generate"  # reintento con retroalimentación sobre las citas inválidas
         return "finalize"
 
+    def after_finalize(state: AgentState):
+        return "authorize_action" if state["answer"].proposed_action else END
+
+    def after_authorize(state: AgentState):
+        return "human_review" if state["action_status"] == "pendiente_aprobacion" else END
+
+    def after_review(state: AgentState):
+        return "execute_action" if state["action_status"] == "aprobada" else END
+
     g = StateGraph(AgentState)
     for name, fn in [("guard_input", guard_input), ("retrieve", retrieve), ("generate", generate),
-                     ("validate", validate), ("finalize", finalize), ("refuse", refuse), ("no_context", no_context)]:
+                     ("validate", validate), ("finalize", finalize), ("refuse", refuse), ("no_context", no_context),
+                     ("authorize_action", authorize_action), ("human_review", human_review),
+                     ("execute_action", execute_action)]:
         g.add_node(name, fn)
     g.add_edge(START, "guard_input")
     g.add_conditional_edges("guard_input", after_guard, ["refuse", "retrieve"])
     g.add_conditional_edges("retrieve", after_retrieve, ["generate", "no_context"])
     g.add_edge("generate", "validate")
     g.add_conditional_edges("validate", after_validate, ["generate", "finalize"])
-    for terminal in ("finalize", "refuse", "no_context"):
+    g.add_conditional_edges("finalize", after_finalize, ["authorize_action", END])
+    g.add_conditional_edges("authorize_action", after_authorize, ["human_review", END])
+    g.add_conditional_edges("human_review", after_review, ["execute_action", END])
+    for terminal in ("refuse", "no_context", "execute_action"):
         g.add_edge(terminal, END)
     return g.compile(checkpointer=checkpointer or MemorySaver())
 
 
+def _result(state: dict) -> dict:
+    pending = state.get("__interrupt__")
+    return {
+        "answer": state["answer"],
+        "action_status": state.get("action_status"),
+        "pending_action": pending[0].value if pending else None,
+        "ticket": state.get("ticket") if state.get("action_status") == "ejecutada" else None,
+    }
+
+
+def run(graph, question: str, role: str, thread_id: str = "default") -> dict:
+    """Ejecuta un turno. Si hay una acción pendiente, `pending_action` trae lo que debe revisar una persona."""
+    return _result(graph.invoke({"question": question, "role": role}, {"configurable": {"thread_id": thread_id}}))
+
+
+def review(graph, thread_id: str, approved: bool, reviewer: str = "revisor") -> dict:
+    """Reanuda un grafo pausado con la decisión humana."""
+    state = graph.invoke(Command(resume={"approved": approved, "reviewer": reviewer}),
+                         {"configurable": {"thread_id": thread_id}})
+    return _result(state)
+
+
 def ask(graph, question: str, role: str, thread_id: str = "default") -> Answer:
-    result = graph.invoke({"question": question, "role": role}, {"configurable": {"thread_id": thread_id}})
-    return result["answer"]
+    return run(graph, question, role, thread_id)["answer"]

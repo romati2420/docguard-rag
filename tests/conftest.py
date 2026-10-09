@@ -9,6 +9,7 @@ from docguard import config
 @pytest.fixture(autouse=True)
 def _trace_to_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "TRACE_FILE", tmp_path / "traces.jsonl")
+    monkeypatch.setattr(config, "TICKETS_FILE", tmp_path / "tickets.jsonl")
 
 
 @pytest.fixture

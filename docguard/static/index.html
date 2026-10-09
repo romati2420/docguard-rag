@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocGuard</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #5d6676; --line: #dde2ea;
+    --accent: #1f5fbf; --accent-ink: #ffffff; --ok: #1d7a46; --warn: #a15c00; --bad: #b3261e;
+    --chip: #eef2f8; --cite: #f3f6fb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11151c; --panel: #181e27; --ink: #e6e9ef; --muted: #9aa4b5; --line: #2a3340;
+      --accent: #5b9bff; --accent-ink: #0b1220; --ok: #4cc38a; --warn: #f0a640; --bad: #ff7b72;
+      --chip: #222b38; --cite: #1d2531;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 20px 16px 120px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  h1 { font-size: 20px; margin: 0; }
+  h1 span { color: var(--muted); font-weight: 400; font-size: 14px; margin-left: 6px; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  select, button, input[type=text] { font: inherit; color: var(--ink); background: var(--panel);
+         border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  a { color: var(--accent); }
+  #log { margin-top: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .msg.user { align-self: flex-end; max-width: 85%; background: var(--chip); }
+  .meta { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+  .step { font-size: 12px; background: var(--chip); border-radius: 999px; padding: 2px 9px; color: var(--muted); }
+  .badge { display: inline-block; font-size: 12px; border-radius: 6px; padding: 1px 7px; margin-right: 6px;
+           border: 1px solid currentColor; }
+  .alta { color: var(--ok); } .media { color: var(--warn); } .baja { color: var(--bad); }
+  .cite { background: var(--cite); border-left: 3px solid var(--accent); border-radius: 6px;
+          padding: 6px 10px; margin-top: 8px; font-size: 13px; }
+  .cite b { font-weight: 600; }
+  .action { border: 1px dashed var(--warn); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
+  .action h3 { margin: 0 0 6px; font-size: 14px; }
+  .action .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .denied { color: var(--bad); margin-top: 8px; font-size: 14px; }
+  .done { color: var(--ok); margin-top: 8px; font-size: 14px; }
+  form { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); }
+  form .inner { max-width: 860px; margin: 0 auto; padding: 12px 16px; display: flex; gap: 8px; }
+  form input { flex: 1; min-width: 0; }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>DocGuard <span>agente RAG seguro · LangGraph + Gemini</span></h1>
+    <div class="controls">
+      <label for="role">Rol</label>
+      <select id="role">
+        <option value="analista">analista</option>
+        <option value="compliance">compliance (solo lectura)</option>
+        <option value="crisis">crisis</option>
+        <option value="admin">admin</option>
+      </select>
+      <button id="reset" type="button">Nueva conversación</button>
+      <a href="/metrics" target="_blank" rel="noopener">Métricas</a>
+    </div>
+  </header>
+  <p class="hint">Prueba: “¿Cuáles son las seis Funciones del CSF 2.0?”, “¿En cuánto tiempo se convoca al comité de
+    crisis?” (cambia de rol) o “Crea un ticket de prioridad alta por un correo de phishing”.</p>
+  <div id="log"></div>
+</div>
+
+<form id="form">
+  <div class="inner">
+    <input id="q" type="text" placeholder="Escribe tu pregunta…" autocomplete="off" required>
+    <button class="primary" type="submit">Enviar</button>
+  </div>
+</form>
+
+<script>
+  // Todo el contenido del modelo se inserta con textContent: nunca como HTML (evita XSS por salida del LLM).
+  const log = document.getElementById("log");
+  const form = document.getElementById("form");
+  const input = document.getElementById("q");
+  const roleSel = document.getElementById("role");
+  let threadId = crypto.randomUUID();
+
+  document.getElementById("reset").onclick = () => { threadId = crypto.randomUUID(); log.replaceChildren(); };
+
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+
+  function renderAnswer(box, a) {
+    const meta = el("div", "meta");
+    meta.append(el("span", "badge " + a.confidence, "confianza " + a.confidence));
+    meta.append(el("span", "", a.answerable ? "respaldada en fuentes" : "sin respaldo suficiente"));
+    box.append(meta, el("div", "", a.answer));
+    for (const c of a.citations) {
+      const cite = el("div", "cite");
+      cite.append(el("b", "", `${c.source} · p.${c.page}`), document.createElement("br"), `“${c.quote}”`);
+      box.append(cite);
+    }
+  }
+
+  function renderPending(box, pending) {
+    const p = pending.proposal;
+    const card = el("div", "action");
+    card.append(el("h3", "", "Acción propuesta: crear ticket — requiere aprobación humana"));
+    card.append(el("div", "", `Título: ${p.title}`));
+    card.append(el("div", "", `Prioridad: ${p.priority}`));
+    card.append(el("div", "", `Descripción: ${p.description}`));
+    const row = el("div", "row");
+    const reviewer = el("input"); reviewer.type = "text"; reviewer.placeholder = "Nombre del revisor"; reviewer.value = "supervisor";
+    const ok = el("button", "primary", "Aprobar"); ok.type = "button";
+    const no = el("button", "", "Rechazar"); no.type = "button";
+    row.append(reviewer, ok, no);
+    card.append(row);
+    box.append(card);
+    const decide = async (approved) => {
+      ok.disabled = no.disabled = true;
+      const r = await fetch("/review", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ thread_id: threadId, approved, reviewer: reviewer.value || "revisor" }) });
+      const data = await r.json();
+      row.remove();
+      card.append(data.ticket
+        ? el("div", "done", `Ticket ${data.ticket.id} creado · aprobado por ${data.ticket.approved_by}`)
+        : el("div", "denied", "Acción rechazada: no se ejecutó nada."));
+    };
+    ok.onclick = () => decide(true);
+    no.onclick = () => decide(false);
+  }
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const question = input.value.trim();
+    if (!question) return;
+    input.value = "";
+    log.append(el("div", "msg user", question));
+    const box = el("div", "msg");
+    const steps = el("div", "steps");
+    box.append(el("div", "meta", `rol: ${roleSel.value}`), steps);
+    log.append(box);
+    box.scrollIntoView({ behavior: "smooth", block: "end" });
+
+    const resp = await fetch("/ask/stream", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ question, role: roleSel.value, thread_id: threadId }) });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        const event = (chunk.match(/^event: (.*)$/m) || [])[1];
+        const data = JSON.parse((chunk.match(/^data: (.*)$/m) || [, "{}"])[1]);
+        if (event === "node") steps.append(el("span", "step", data.node));
+        else if (event === "answer") renderAnswer(box, data);
+        else if (event === "pending_action") renderPending(box, data);
+        else if (event === "action_denied") box.append(el("div", "denied",
+          `El rol "${data.role}" no tiene permiso para usar la herramienta ${data.tool}.`));
+      }
+      box.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  };
+</script>
+</body>
+</html>

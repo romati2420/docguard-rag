@@ -37,7 +37,8 @@ def validate_answer(answer: Answer, docs: list[Document]) -> list[str]:
     if not answer.answerable:
         return []
     if not answer.citations:
-        return ["La respuesta no incluye citas a las fuentes."]
+        # Una solicitud de acción (ticket) puede no consultar documentos; se controla en la aprobación humana.
+        return [] if answer.proposed_action else ["La respuesta no incluye citas a las fuentes."]
     return [err for c in answer.citations if (err := check_citation(c, docs))]
 
 

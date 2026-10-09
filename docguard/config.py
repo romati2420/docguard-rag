@@ -26,6 +26,10 @@ EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "50"))
 TOP_K = int(os.getenv("TOP_K", "4"))
 MAX_GENERATION_ATTEMPTS = int(os.getenv("MAX_GENERATION_ATTEMPTS", "2"))
 
+TICKETS_FILE = Path(os.getenv("DOCGUARD_TICKETS_FILE", ROOT / "logs" / "tickets.jsonl"))
+# Qué roles pueden usar cada herramienta. compliance es de solo lectura.
+TOOL_PERMISSIONS = {"crear_ticket": {"analista", "crisis", "admin"}}
+
 # USD por 1M de tokens, para estimar costo por consulta. Verificar con la lista de precios vigente.
 PRICE_INPUT_PER_M = float(os.getenv("PRICE_INPUT_PER_M", "0.30"))
 PRICE_OUTPUT_PER_M = float(os.getenv("PRICE_OUTPUT_PER_M", "2.50"))

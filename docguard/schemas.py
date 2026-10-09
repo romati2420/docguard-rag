@@ -25,8 +25,19 @@ class Citation(BaseModel):
         return v[:MAX_QUOTE_CHARS].rsplit(" ", 1)[0]
 
 
+class TicketProposal(BaseModel):
+    """Acción propuesta por el agente. Nunca se ejecuta sin aprobación humana."""
+    title: str = Field(max_length=120, description="Título breve del ticket")
+    description: str = Field(description="Descripción del problema o solicitud, sin datos personales")
+    priority: Literal["baja", "media", "alta", "critica"] = Field(description="Prioridad sugerida")
+
+
 class Answer(BaseModel):
     answer: str = Field(description="Respuesta en español basada solo en los documentos entregados")
     citations: list[Citation] = Field(default_factory=list, description="Fuentes que respaldan la respuesta")
     answerable: bool = Field(description="false si los documentos no contienen información suficiente")
     confidence: Literal["alta", "media", "baja"] = Field(description="Confianza en que la respuesta está respaldada")
+    proposed_action: TicketProposal | None = Field(
+        default=None,
+        description="Solo si el usuario pide explícitamente crear/registrar/escalar un ticket; en otro caso null",
+    )
