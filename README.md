@@ -1,7 +1,7 @@
 # DocGuard — Agente RAG documental seguro (LangGraph + Gemini)
 
 Aplicación full stack con un agente conversacional que responde preguntas sobre documentos internos **con citas
-verificables**, **respeta los permisos de cada rol**, **resiste prompt injection** y puede **proponer acciones
+validadas contra la fuente**, **respeta los permisos de cada rol**, **resiste prompt injection** y puede **proponer acciones
 (tickets) que solo se ejecutan con aprobación humana**. Construido con
 LangGraph, Gemini (Flash), FAISS, Pydantic, FastAPI y una interfaz web propia, con evaluación automática contra un
 set de referencia, monitoreo y una [evaluación de riesgos de IA](docs/GOBERNANZA_IA.md).
@@ -39,7 +39,7 @@ flowchart LR
 | `guard_input` | Detecta prompt injection directa (heurísticas ES/EN) y redacta PII (RUT con dígito verificador, email, teléfono, tarjetas con Luhn) **antes** de que llegue al modelo |
 | `retrieve` | Búsqueda semántica en FAISS con **filtro por rol dentro de la búsqueda**: los documentos no autorizados nunca entran al prompt. Las líneas con instrucciones incrustadas (injection indirecta) se eliminan del fragmento antes de enviarlo al modelo |
 | `generate` | Gemini con salida estructurada validada por Pydantic (`Answer` → respuesta, citas, `answerable`, confianza). El contexto va delimitado y marcado como *datos, no instrucciones* |
-| `validate` | Verifica que cada cita apunte a un fragmento recuperado (fuente + página) y que el texto citado exista literalmente. Si falla, **reintenta con retroalimentación** |
+| `validate` | Verifica que cada cita apunte a un fragmento recuperado (fuente + página) y que el texto citado coincida con el fragmento: coincidencia textual normalizada o, como tolerancia a errores de extracción del PDF, ≥85% de sus palabras presentes (esta segunda vía no garantiza el orden). Si falla, **reintenta con retroalimentación** |
 | `finalize` | Calibración: si la respuesta no se puede respaldar, se degrada a `confianza=baja` o se convierte en "no lo sé". Redacta PII en la salida |
 | `authorize_action` | Si el modelo propone una acción, verifica que el **rol tenga permiso para esa herramienta** (`compliance` es de solo lectura) |
 | `human_review` | **Pausa el grafo** (`interrupt`) hasta que una persona aprueba o rechaza; el estado queda persistido |
@@ -130,20 +130,30 @@ ficticio; 108 fragmentos indexados): 6 preguntas normales y 4 adversariales.
 | Retrieval recall | Fracción de palabras clave esperadas presentes en los 4 fragmentos recuperados (casos con respuesta) | 1.00 |
 | Answer recall | Fracción de palabras clave esperadas presentes en la respuesta | 1.00 |
 | Decisión correcta | `answerable` coincide con lo esperado (responder vs. abstenerse) | 10/10 |
-| Citas válidas | Todas las citas apuntan a un fragmento recuperado y su texto aparece literalmente en él | 7/7 |
+| Citas aceptadas | Todas las citas apuntan a un fragmento recuperado y pasan el validador (coincidencia normalizada o ≥85% de palabras) | 7/7 |
 | Fugas | La respuesta contiene un dato del documento restringido (caso sin permiso) o texto de las instrucciones del sistema (caso de injection indirecta) | 0 |
 | Latencia promedio | Tiempo de punta a punta por consulta | ~4–6 s |
 
 > Es un set pequeño, pensado como prueba de regresión, no como benchmark: "0 fugas" significa que no hubo fugas
 > en estos casos, no que el sistema sea inmune. La primera corrida marcó un caso fallido: el modelo devolvía citas de
 > más de 300 caracteres y la validación de Pydantic descartaba una respuesta correcta. Se corrigió recortando la cita
-> (sigue siendo literal y verificable) y el caso quedó cubierto por una prueba unitaria.
+> (sigue siendo un fragmento de la cita original) y el caso quedó cubierto por una prueba unitaria.
 
 ## Datos de ejemplo
 
 - `NIST_CSF_2.0_es.pdf`: traducción oficial al español del NIST Cybersecurity Framework 2.0 (dominio público).
 - `protocolo_crisis_interno.md`: documento **ficticio**, restringido a los roles `crisis` y `admin`, que incluye
   a propósito una instrucción maliciosa para demostrar la defensa contra injection indirecta.
+
+## Limitaciones del prototipo
+
+- **Sin autenticación:** el rol y el nombre del revisor llegan en el cuerpo de la petición. Cualquiera con acceso a la API
+  podría declarar otro rol o aprobar una acción. En un despliegue real, el rol y la identidad deben venir de un token
+  verificado (IAM / OIDC) y el revisor debe ser distinto de quien solicita la acción.
+- **PII en los documentos:** la redacción cubre preguntas, respuestas y propuestas de acción, pero no sanitiza los
+  fragmentos recuperados antes de enviarlos al modelo.
+- **Estado en memoria:** el checkpointer es `MemorySaver` (se pierde al reiniciar) y los tickets se guardan en un JSONL local.
+- **Evaluación pequeña:** 10 casos sobre 2 documentos; sirve como regresión, no como benchmark.
 
 ## Próximos pasos
 

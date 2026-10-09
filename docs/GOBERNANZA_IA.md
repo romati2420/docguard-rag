@@ -43,5 +43,8 @@ retrieval o del modelo.
 - Los guardrails de injection son heurísticos: bloquean patrones comunes, no ataques nuevos u ofuscados. La
   siguiente capa sería un clasificador dedicado.
 - El set de referencia tiene 10 casos: sirve como regresión, no como benchmark estadístico.
-- El rol llega en la petición; en producción debe venir del token de identidad (IAM / OIDC).
+- **Sin autenticación:** el rol y el revisor llegan en la petición; en producción deben venir de un token verificado
+  (IAM / OIDC), con separación de funciones (quien solicita no puede aprobar).
+- La redacción de PII no se aplica a los fragmentos recuperados antes de enviarlos al modelo.
+- La verificación de citas acepta una coincidencia de ≥85% de palabras como tolerancia, que no garantiza el orden.
 - El sistema de tickets es local (JSONL) y simula una API tipo Jira.
