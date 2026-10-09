@@ -101,7 +101,9 @@
   function renderAnswer(box, a) {
     const meta = el("div", "meta");
     meta.append(el("span", "badge " + a.confidence, "confianza " + a.confidence));
-    meta.append(el("span", "", a.answerable ? "respaldada en fuentes" : "sin respaldo suficiente"));
+    const support = a.citations.length ? `respaldada en ${a.citations.length} cita(s) verificada(s)`
+      : a.proposed_action ? "solicitud de acción (no consulta documentos)" : "sin respaldo en las fuentes";
+    meta.append(el("span", "", support));
     box.append(meta, el("div", "", a.answer));
     for (const c of a.citations) {
       const cite = el("div", "cite");
@@ -138,9 +140,14 @@
     no.onclick = () => decide(false);
   }
 
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const question = input.value.trim();
+  form.onsubmit = (e) => { e.preventDefault(); send(input.value.trim()); };
+
+  // Enlace directo: /?role=crisis&q=pregunta envía la pregunta al cargar (útil para demos).
+  const params = new URLSearchParams(location.search);
+  if (params.get("role")) roleSel.value = params.get("role");
+  if (params.get("q")) send(params.get("q"));
+
+  async function send(question) {
     if (!question) return;
     input.value = "";
     log.append(el("div", "msg user", question));
@@ -172,7 +179,7 @@
       }
       box.scrollIntoView({ behavior: "smooth", block: "end" });
     }
-  };
+  }
 </script>
 </body>
 </html>

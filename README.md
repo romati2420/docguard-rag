@@ -6,6 +6,15 @@ verificables**, **respeta los permisos de cada rol**, **resiste prompt injection
 LangGraph, Gemini (Flash), FAISS, Pydantic, FastAPI y una interfaz web propia, con evaluación automática contra un
 set de referencia, monitoreo y una [evaluación de riesgos de IA](docs/GOBERNANZA_IA.md).
 
+## Demo
+
+| Respuesta con cita verificada (rol `crisis`) | Acción propuesta que espera aprobación humana (rol `analista`) |
+|---|---|
+| ![Respuesta con cita](docs/img/demo_citas.png) | ![Aprobación humana](docs/img/demo_aprobacion.png) |
+
+Capturas de la aplicación corriendo localmente contra la API de Gemini. Con el rol `analista`, la misma pregunta
+sobre el comité de crisis responde *"No encontré información en los documentos autorizados para tu rol"*.
+
 ## Arquitectura
 
 ```mermaid
@@ -41,6 +50,22 @@ está sobrecargado. La ingesta embebe por lotes y reintenta ante límites de cuo
 
 **Memoria conversacional** por `thread_id` mediante el checkpointer de LangGraph. **Observabilidad**:
 cada nodo registra latencia, tokens y costo estimado en `logs/traces.jsonl`.
+
+## Stack e integración del modelo
+
+| Capa | Implementación |
+|---|---|
+| Modelo | API de Gemini vía LangChain (`langchain-google-genai`, `ChatGoogleGenerativeAI`), `gemini-3.5-flash`, temperatura 0, timeout de 45 s |
+| Fallback | `with_fallbacks`: si la llamada al modelo principal falla (sobrecarga 503, timeout), la misma petición se repite con `gemini-3.5-flash-lite` |
+| Salida estructurada | `with_structured_output(Answer, include_raw=True)`: el JSON del modelo se valida con Pydantic y se conserva la respuesta cruda para registrar tokens |
+| Embeddings | `gemini-embedding-001` (3.072 dimensiones), por lotes de 50 con reintento ante cuota (429) |
+| Segmentación | `RecursiveCharacterTextSplitter`, 1.000 caracteres con 150 de solapamiento, cortando primero por títulos y párrafos; metadatos de fuente, página y roles por fragmento |
+| Recuperación | Similitud en FAISS, top-4 entre los 50 candidatos más cercanos, filtrados por rol |
+| Backend | FastAPI: `/ask`, `/ask/stream` (Server-Sent Events), `/review`, `/metrics` |
+| Frontend | HTML, CSS y JavaScript sin framework: lectura del stream SSE con `fetch`, tema claro/oscuro, todo el contenido del modelo insertado como texto (sin `innerHTML`) para evitar XSS |
+| Gateway | `LLM_PROVIDER=openai_compat` + `OPENAI_BASE_URL` para usar un gateway compatible con el SDK de OpenAI |
+
+> Las cuentas nuevas de Google AI Studio ya no tienen acceso a `gemini-2.5-flash`; el modelo se cambia con `CHAT_MODEL`.
 
 ## Decisiones de diseño
 
@@ -87,21 +112,32 @@ El set de referencia (`evals/golden_set.json`) cubre preguntas con respuesta, pr
 acceso sin permisos, injection directa e indirecta. Métricas: *retrieval recall*, *answer recall*,
 decisión correcta de responder/abstenerse, validez de citas, fugas y latencia.
 
-### Resultados (gemini-3.5-flash, 10 casos)
+### Resultados (gemini-3.5-flash)
 
-| Métrica | Resultado |
-|---|---|
-| Retrieval recall (palabras clave esperadas presentes en los fragmentos recuperados) | 1.00 |
-| Answer recall (palabras clave esperadas presentes en la respuesta) | 1.00 |
-| Decisión correcta de responder / abstenerse | 10/10 |
-| Citas verificadas literalmente en la fuente | 1.00 |
-| Fugas (datos restringidos o instrucciones del sistema) | 0 |
-| Latencia promedio | ~6 s |
+**Alcance:** set inicial de **10 casos** sobre **2 documentos** (NIST CSF 2.0, 36 páginas, y un protocolo interno
+ficticio; 108 fragmentos indexados): 6 preguntas normales y 4 adversariales.
 
-> El set es pequeño y sirve como prueba de regresión, no como benchmark. La primera corrida marcó un caso
-> fallido: el modelo devolvía citas de más de 300 caracteres y la validación de Pydantic descartaba una
-> respuesta correcta. Se corrigió recortando la cita (sigue siendo literal y verificable) y el caso quedó
-> cubierto por una prueba unitaria.
+| Caso | Cantidad | Qué se espera |
+|---|---|---|
+| Preguntas con respuesta en los documentos | 6 | Responder con citas verificadas |
+| Pregunta sobre un documento restringido, con un rol sin permiso | 1 | Abstenerse, sin revelar el contenido |
+| Pregunta fuera de dominio | 1 | Abstenerse |
+| Prompt injection directa | 1 | Bloquear antes del modelo |
+| Pregunta sobre un fragmento con injection indirecta | 1 | Responder sin obedecer la instrucción incrustada |
+
+| Métrica | Definición | Resultado |
+|---|---|---|
+| Retrieval recall | Fracción de palabras clave esperadas presentes en los 4 fragmentos recuperados (casos con respuesta) | 1.00 |
+| Answer recall | Fracción de palabras clave esperadas presentes en la respuesta | 1.00 |
+| Decisión correcta | `answerable` coincide con lo esperado (responder vs. abstenerse) | 10/10 |
+| Citas válidas | Todas las citas apuntan a un fragmento recuperado y su texto aparece literalmente en él | 7/7 |
+| Fugas | La respuesta contiene un dato del documento restringido (caso sin permiso) o texto de las instrucciones del sistema (caso de injection indirecta) | 0 |
+| Latencia promedio | Tiempo de punta a punta por consulta | ~4–6 s |
+
+> Es un set pequeño, pensado como prueba de regresión, no como benchmark: "0 fugas" significa que no hubo fugas
+> en estos casos, no que el sistema sea inmune. La primera corrida marcó un caso fallido: el modelo devolvía citas de
+> más de 300 caracteres y la validación de Pydantic descartaba una respuesta correcta. Se corrigió recortando la cita
+> (sigue siendo literal y verificable) y el caso quedó cubierto por una prueba unitaria.
 
 ## Datos de ejemplo
 
