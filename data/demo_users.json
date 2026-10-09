@@ -1,0 +1,35 @@
+{
+  "_comment": "Usuarios de DEMOSTRACIÓN. Solo se guardan hashes SHA-256 de los tokens; los tokens de demo están en el README. En producción la identidad viene de IAM/OIDC.",
+  "users": [
+    {
+      "user": "ana",
+      "role": "analista",
+      "reviewer": false,
+      "token_sha256": "5013a2794a6dc6db581ba518e6eeb7a995c4731763c7a8560f0f5d49f1112ff6"
+    },
+    {
+      "user": "carla",
+      "role": "compliance",
+      "reviewer": false,
+      "token_sha256": "5f47b8b1579a87341152438a95d5a8a0cae4426352d2fe39aa4a9f32fe7f25e8"
+    },
+    {
+      "user": "cristian",
+      "role": "crisis",
+      "reviewer": false,
+      "token_sha256": "a9fb33992a254dd354f22e7d22e773ddb93c877cb4c64a1db43296a74ec7087b"
+    },
+    {
+      "user": "sofia",
+      "role": "analista",
+      "reviewer": true,
+      "token_sha256": "55a82ff8be24870cb8013ee3f06671d6eb5b2748a493dc2d73e2b340ec4966f5"
+    },
+    {
+      "user": "admin",
+      "role": "admin",
+      "reviewer": true,
+      "token_sha256": "0725102b7af1434bc1760409c040c22c96c06393119621a51ac57b10241d809a"
+    }
+  ]
+}

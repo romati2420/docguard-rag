@@ -22,6 +22,7 @@ HISTORY_TURNS = 3
 class AgentState(TypedDict, total=False):
     question: str
     role: str
+    requested_by: str  # usuario autenticado que hace la consulta
     safe_question: str
     blocked_reason: str | None
     docs: list[Document]
@@ -50,13 +51,16 @@ def build_graph(retriever: Callable[[str, str], list[Document]], answer_fn: Call
             docs = retriever(state["safe_question"], state["role"])
             # Prompt injection indirecta: se eliminan las líneas con instrucciones incrustadas y,
             # si el fragmento queda vacío, se descarta completo.
-            clean, removed = [], 0
+            # Además se redacta la PII de los fragmentos antes de que lleguen al modelo.
+            clean, removed, pii_in_docs = [], 0, 0
             for d in docs:
                 text, n = strip_injected_lines(d.page_content)
+                text, pii = redact_pii(text)
                 removed += n
+                pii_in_docs += len(pii)
                 if text:
                     clean.append(Document(text, metadata=d.metadata))
-            extra.update(retrieved=len(docs), quarantined_lines=removed,
+            extra.update(retrieved=len(docs), quarantined_lines=removed, pii_redacted_in_docs=pii_in_docs,
                          sources=[f"{d.metadata['source']}#p{d.metadata['page']}" for d in clean])
             return {"docs": clean, "quarantined": removed}
 
@@ -102,16 +106,21 @@ def build_graph(retriever: Callable[[str, str], list[Document]], answer_fn: Call
 
     def human_review(state: AgentState):
         # El grafo se pausa aquí y queda persistido en el checkpointer hasta que una persona decide.
-        decision = interrupt({"tool": "crear_ticket", "role": state["role"],
+        requester = state.get("requested_by", "anonimo")
+        decision = interrupt({"tool": "crear_ticket", "role": state["role"], "requested_by": requester,
                               "proposal": state["answer"].proposed_action.model_dump()})
-        approved = bool(decision.get("approved"))
-        with span("human_review", approved=approved, reviewer=decision.get("reviewer", "revisor")):
+        reviewer = decision.get("reviewer", "revisor")
+        # Separación de funciones (four-eyes): quien solicita la acción no puede aprobarla.
+        self_approval = reviewer == requester
+        approved = bool(decision.get("approved")) and not self_approval
+        with span("human_review", approved=approved, reviewer=reviewer, self_approval_blocked=self_approval):
             return {"action_status": "aprobada" if approved else "rechazada",
-                    "ticket": {"approved_by": decision.get("reviewer", "revisor")} if approved else None}
+                    "ticket": {"approved_by": reviewer} if approved else None}
 
     def execute_action(state: AgentState, config: RunnableConfig):
         with span("execute_action") as extra:
             ticket = create_ticket(state["answer"].proposed_action, state["role"],
+                                   requested_by=state.get("requested_by", "anonimo"),
                                    approved_by=state["ticket"]["approved_by"],
                                    thread_id=config["configurable"]["thread_id"])
             extra.update(ticket_id=ticket["id"])
@@ -179,9 +188,10 @@ def _result(state: dict) -> dict:
     }
 
 
-def run(graph, question: str, role: str, thread_id: str = "default") -> dict:
+def run(graph, question: str, role: str, thread_id: str = "default", user: str = "anonimo") -> dict:
     """Ejecuta un turno. Si hay una acción pendiente, `pending_action` trae lo que debe revisar una persona."""
-    return _result(graph.invoke({"question": question, "role": role}, {"configurable": {"thread_id": thread_id}}))
+    state = {"question": question, "role": role, "requested_by": user}
+    return _result(graph.invoke(state, {"configurable": {"thread_id": thread_id}}))
 
 
 def review(graph, thread_id: str, approved: bool, reviewer: str = "revisor") -> dict:

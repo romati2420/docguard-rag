@@ -26,6 +26,7 @@ EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "50"))
 TOP_K = int(os.getenv("TOP_K", "4"))
 MAX_GENERATION_ATTEMPTS = int(os.getenv("MAX_GENERATION_ATTEMPTS", "2"))
 
+USERS_FILE = Path(os.getenv("DOCGUARD_USERS_FILE", ROOT / "data" / "demo_users.json"))
 TICKETS_FILE = Path(os.getenv("DOCGUARD_TICKETS_FILE", ROOT / "logs" / "tickets.jsonl"))
 # Qué roles pueden usar cada herramienta. compliance es de solo lectura.
 TOOL_PERMISSIONS = {"crear_ticket": {"analista", "crisis", "admin"}}

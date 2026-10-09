@@ -8,12 +8,34 @@ set de referencia, monitoreo y una [evaluación de riesgos de IA](docs/GOBERNANZ
 
 ## Demo
 
-| Respuesta con cita verificada (rol `crisis`) | Acción propuesta que espera aprobación humana (rol `analista`) |
-|---|---|
-| ![Respuesta con cita](docs/img/demo_citas.png) | ![Aprobación humana](docs/img/demo_aprobacion.png) |
+| Respuesta con cita validada (`cristian`, rol crisis) | Solicitud de ticket (`ana`, analista) | Panel del revisor (`sofia`) |
+|---|---|---|
+| ![Respuesta con cita](docs/img/demo_citas.png) | ![Solicitud](docs/img/demo_solicitud.png) | ![Revisor](docs/img/demo_revisor.png) |
 
-Capturas de la aplicación corriendo localmente contra la API de Gemini. Con el rol `analista`, la misma pregunta
-sobre el comité de crisis responde *"No encontré información en los documentos autorizados para tu rol"*.
+Capturas de la aplicación corriendo localmente contra la API de Gemini. Con el usuario `ana` (analista), la misma
+pregunta sobre el comité de crisis responde *"No encontré información en los documentos autorizados para tu rol"*.
+Ana puede proponer un ticket, pero solo otro usuario con permiso de revisión (Sofía) puede aprobarlo.
+
+## Autenticación y separación de funciones
+
+- Cada petición exige `Authorization: Bearer <token>`. **El rol y la identidad se resuelven en el servidor**
+  (`docguard/auth.py`); un `role` enviado en el cuerpo se ignora. Los tokens se guardan como hash SHA-256 y se comparan
+  en tiempo constante.
+- **Conversaciones aisladas por usuario:** el `thread_id` interno es `<usuario>:<thread_id>`, así que nadie puede
+  leer ni continuar la conversación de otro aunque adivine su ID.
+- **Four-eyes:** solo un usuario con permiso de revisión aprueba acciones, y **nunca las que él mismo solicitó**.
+  Se valida en la API (403) y otra vez dentro del grafo, por si se llama sin pasar por la API.
+- `/metrics` es solo para `admin`.
+
+Usuarios de demostración (`data/demo_users.json`, solo hashes):
+
+| Usuario | Rol | Revisor | Token de demo |
+|---|---|---|---|
+| ana | analista | no | `demo-ana-ce586424` |
+| carla | compliance (solo lectura) | no | `demo-carla-a785d724` |
+| cristian | crisis | no | `demo-cristian-ec3e62ce` |
+| sofia | analista | sí | `demo-sofia-d0f5e769` |
+| admin | admin | sí | `demo-admin-d2293f48` |
 
 ## Arquitectura
 
@@ -93,10 +115,12 @@ uvicorn docguard.api:app --reload   # interfaz web en http://localhost:8000
 
 | Endpoint | Uso |
 |---|---|
-| `GET /` | Interfaz web: chat con streaming, selector de rol, citas y tarjeta de aprobación de acciones |
+| `GET /` | Interfaz web: inicio de sesión con token, chat con streaming, citas y panel de revisión |
 | `POST /ask` · `POST /ask/stream` | Pregunta (respuesta completa o progreso del grafo por SSE) |
-| `POST /review` | Aprueba o rechaza una acción pendiente y reanuda el grafo |
-| `GET /metrics` | Monitoreo: bloqueos, abstenciones, reintentos, acciones, tokens, costo y latencia por nodo |
+| `GET /me` | Usuario, rol y permisos según el token |
+| `GET /reviews/pending` | Acciones pendientes de otros usuarios (solo revisores) |
+| `POST /review` | Aprueba o rechaza una acción pendiente y reanuda el grafo (solo revisores, nunca la propia) |
+| `GET /metrics` | Monitoreo: bloqueos, abstenciones, reintentos, acciones, tokens, costo y latencia por nodo (solo admin) |
 
 **Contenedor:** `docker build -t docguard-rag .` — imagen sin root, lista para Cloud Run (`$PORT`, la API key
 se inyecta como secreto en tiempo de ejecución).
@@ -104,7 +128,7 @@ se inyecta como secreto en tiempo de ejecución).
 ## Pruebas y evaluación
 
 ```bash
-pytest                          # 36 pruebas offline: guardrails, citas, ACL, reintentos, memoria, aprobación humana, métricas
+pytest                          # 45 pruebas offline: guardrails, citas, ACL, reintentos, memoria, aprobación humana, autenticación, métricas
 python -m evals.run_eval        # evaluación con el modelo real contra evals/golden_set.json
 ```
 
@@ -147,17 +171,16 @@ ficticio; 108 fragmentos indexados): 6 preguntas normales y 4 adversariales.
 
 ## Limitaciones del prototipo
 
-- **Sin autenticación:** el rol y el nombre del revisor llegan en el cuerpo de la petición. Cualquiera con acceso a la API
-  podría declarar otro rol o aprobar una acción. En un despliegue real, el rol y la identidad deben venir de un token
-  verificado (IAM / OIDC) y el revisor debe ser distinto de quien solicita la acción.
-- **PII en los documentos:** la redacción cubre preguntas, respuestas y propuestas de acción, pero no sanitiza los
-  fragmentos recuperados antes de enviarlos al modelo.
-- **Estado en memoria:** el checkpointer es `MemorySaver` (se pierde al reiniciar) y los tickets se guardan en un JSONL local.
+- **Identidad de demostración:** la autenticación usa tokens estáticos de un archivo local. En un despliegue real debe
+  reemplazarse por un token verificado de IAM / OIDC (expiración, revocación, MFA).
+- **PII:** la redacción es por patrones (RUT, email, teléfono, tarjeta) en preguntas, fragmentos recuperados, respuestas
+  y propuestas de acción; no detecta nombres propios ni direcciones.
+- **Estado en memoria:** la cola de revisiones pendientes vive en el proceso; el checkpointer es `MemorySaver` (se pierde al reiniciar) y los tickets se guardan en un JSONL local.
 - **Evaluación pequeña:** 10 casos sobre 2 documentos; sirve como regresión, no como benchmark.
 
 ## Próximos pasos
 
-- Despliegue en Cloud Run con el rol tomado del token de identidad (IAM / OIDC).
+- Despliegue en Cloud Run con identidad desde IAM / OIDC en lugar de tokens de demostración.
 - Trazas con Langfuse / OpenTelemetry en lugar del JSONL local.
 - Vertex AI Vector Search y Document AI (OCR) para documentos escaneados.
 - Clasificador de injection basado en modelo como segunda capa.

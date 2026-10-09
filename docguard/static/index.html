@@ -51,30 +51,46 @@
   form .inner { max-width: 860px; margin: 0 auto; padding: 12px 16px; display: flex; gap: 8px; }
   form input { flex: 1; min-width: 0; }
   .hint { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .row input { flex: 1; min-width: 0; }
+  #login, #reviews, #metricsOut { margin-top: 14px; }
+  #metricsOut { white-space: pre-wrap; font-size: 12px; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>DocGuard <span>agente RAG seguro · LangGraph + Gemini</span></h1>
-    <div class="controls">
-      <label for="role">Rol</label>
-      <select id="role">
-        <option value="analista">analista</option>
-        <option value="compliance">compliance (solo lectura)</option>
-        <option value="crisis">crisis</option>
-        <option value="admin">admin</option>
-      </select>
+    <div class="controls" id="session" hidden>
+      <span id="who"></span>
       <button id="reset" type="button">Nueva conversación</button>
-      <a href="/metrics" target="_blank" rel="noopener">Métricas</a>
+      <button id="metricsBtn" type="button" hidden>Métricas</button>
+      <button id="logout" type="button">Salir</button>
     </div>
   </header>
-  <p class="hint">Prueba: “¿Cuáles son las seis Funciones del CSF 2.0?”, “¿En cuánto tiempo se convoca al comité de
-    crisis?” (cambia de rol) o “Crea un ticket de prioridad alta por un correo de phishing”.</p>
+
+  <div id="login" class="msg">
+    <div class="meta">Inicia sesión con tu token. El rol y los permisos los asigna el servidor.</div>
+    <div class="row">
+      <input id="token" type="password" placeholder="Token (ver README para los usuarios de demo)" autocomplete="off">
+      <button id="loginBtn" class="primary" type="button">Entrar</button>
+    </div>
+    <div id="loginErr" class="denied" hidden></div>
+  </div>
+
+  <div id="reviews" class="msg" hidden>
+    <div class="meta">Revisiones pendientes (no aparecen las solicitudes que hiciste tú)
+      <button id="refreshReviews" type="button">Actualizar</button></div>
+    <div id="reviewList"></div>
+  </div>
+  <pre id="metricsOut" class="msg" hidden></pre>
+  <p class="hint" id="hint" hidden>Prueba: “¿Cuáles son las seis Funciones del CSF 2.0?”, “¿En cuánto tiempo se convoca
+    al comité de crisis?” (compara usuarios) o “Crea un ticket de prioridad alta por un correo de phishing”.</p>
   <div id="log"></div>
 </div>
 
-<form id="form">
+<form id="form" hidden>
   <div class="inner">
     <input id="q" type="text" placeholder="Escribe tu pregunta…" autocomplete="off" required>
     <button class="primary" type="submit">Enviar</button>
@@ -86,10 +102,14 @@
   const log = document.getElementById("log");
   const form = document.getElementById("form");
   const input = document.getElementById("q");
-  const roleSel = document.getElementById("role");
-  let threadId = crypto.randomUUID();
+  const $ = (id) => document.getElementById(id);
+  let threadId = crypto.randomUUID().slice(0, 8);
+  let token = null;
+  let me = null;
 
-  document.getElementById("reset").onclick = () => { threadId = crypto.randomUUID(); log.replaceChildren(); };
+  function store(k, v) { try { v === null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch {} }
+  function load(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
+  const auth = () => ({ "content-type": "application/json", "authorization": `Bearer ${token}` });
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -98,10 +118,71 @@
     return n;
   }
 
+  async function login(t) {
+    const r = await fetch("/me", { headers: { authorization: `Bearer ${t}` } });
+    if (!r.ok) { $("loginErr").textContent = "Token inválido."; $("loginErr").hidden = false; return; }
+    token = t; me = await r.json(); store("docguard_token", t);
+    $("who").textContent = `${me.user} · rol ${me.role}${me.reviewer ? " · revisor" : ""}`;
+    $("login").hidden = true; $("session").hidden = false; form.hidden = false; $("hint").hidden = false;
+    $("reviews").hidden = !me.reviewer; $("metricsBtn").hidden = me.role !== "admin";
+    if (me.reviewer) loadReviews();
+    const q = new URLSearchParams(location.search).get("q");
+    if (q) send(q);
+  }
+
+  $("loginBtn").onclick = () => login($("token").value.trim());
+  $("token").onkeydown = (e) => { if (e.key === "Enter") login($("token").value.trim()); };
+  $("logout").onclick = () => { store("docguard_token", null); location.reload(); };
+  $("reset").onclick = () => { threadId = crypto.randomUUID().slice(0, 8); log.replaceChildren(); };
+  $("metricsBtn").onclick = async () => {
+    const r = await fetch("/metrics", { headers: auth() });
+    $("metricsOut").textContent = JSON.stringify(await r.json(), null, 2); $("metricsOut").hidden = false;
+  };
+  $("refreshReviews").onclick = () => loadReviews();
+
+  async function loadReviews() {
+    const list = $("reviewList");
+    const items = await (await fetch("/reviews/pending", { headers: auth() })).json();
+    list.replaceChildren();
+    if (!items.length) { list.append(el("div", "hint", "No hay acciones pendientes de otros usuarios.")); return; }
+    for (const p of items) list.append(reviewCard(p));
+  }
+
+  function proposalCard(p, title) {
+    const card = el("div", "action");
+    card.append(el("h3", "", title));
+    card.append(el("div", "", `Título: ${p.proposal.title}`));
+    card.append(el("div", "", `Prioridad: ${p.proposal.priority}`));
+    card.append(el("div", "", `Descripción: ${p.proposal.description}`));
+    card.append(el("div", "meta", `Solicitado por ${p.requested_by} (rol ${p.role})`));
+    return card;
+  }
+
+  function reviewCard(p) {
+    const card = proposalCard(p, "Crear ticket — pendiente de tu revisión");
+    const row = el("div", "row");
+    const ok = el("button", "primary", "Aprobar"); ok.type = "button";
+    const no = el("button", "", "Rechazar"); no.type = "button";
+    row.append(ok, no); card.append(row);
+    const decide = async (approved) => {
+      ok.disabled = no.disabled = true;
+      const r = await fetch("/review", { method: "POST", headers: auth(),
+        body: JSON.stringify({ review_id: p.review_id, approved }) });
+      const data = await r.json();
+      row.remove();
+      card.append(!r.ok ? el("div", "denied", data.detail)
+        : data.ticket ? el("div", "done", `Ticket ${data.ticket.id} creado · solicitado por ${data.ticket.requested_by} · aprobado por ${data.ticket.approved_by}`)
+        : el("div", "denied", "Acción rechazada: no se ejecutó nada."));
+    };
+    ok.onclick = () => decide(true);
+    no.onclick = () => decide(false);
+    return card;
+  }
+
   function renderAnswer(box, a) {
     const meta = el("div", "meta");
     meta.append(el("span", "badge " + a.confidence, "confianza " + a.confidence));
-    const support = a.citations.length ? `respaldada en ${a.citations.length} cita(s) verificada(s)`
+    const support = a.citations.length ? `respaldada en ${a.citations.length} cita(s) validada(s)`
       : a.proposed_action ? "solicitud de acción (no consulta documentos)" : "sin respaldo en las fuentes";
     meta.append(el("span", "", support));
     box.append(meta, el("div", "", a.answer));
@@ -112,40 +193,7 @@
     }
   }
 
-  function renderPending(box, pending) {
-    const p = pending.proposal;
-    const card = el("div", "action");
-    card.append(el("h3", "", "Acción propuesta: crear ticket — requiere aprobación humana"));
-    card.append(el("div", "", `Título: ${p.title}`));
-    card.append(el("div", "", `Prioridad: ${p.priority}`));
-    card.append(el("div", "", `Descripción: ${p.description}`));
-    const row = el("div", "row");
-    const reviewer = el("input"); reviewer.type = "text"; reviewer.placeholder = "Nombre del revisor"; reviewer.value = "supervisor";
-    const ok = el("button", "primary", "Aprobar"); ok.type = "button";
-    const no = el("button", "", "Rechazar"); no.type = "button";
-    row.append(reviewer, ok, no);
-    card.append(row);
-    box.append(card);
-    const decide = async (approved) => {
-      ok.disabled = no.disabled = true;
-      const r = await fetch("/review", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ thread_id: threadId, approved, reviewer: reviewer.value || "revisor" }) });
-      const data = await r.json();
-      row.remove();
-      card.append(data.ticket
-        ? el("div", "done", `Ticket ${data.ticket.id} creado · aprobado por ${data.ticket.approved_by}`)
-        : el("div", "denied", "Acción rechazada: no se ejecutó nada."));
-    };
-    ok.onclick = () => decide(true);
-    no.onclick = () => decide(false);
-  }
-
   form.onsubmit = (e) => { e.preventDefault(); send(input.value.trim()); };
-
-  // Enlace directo: /?role=crisis&q=pregunta envía la pregunta al cargar (útil para demos).
-  const params = new URLSearchParams(location.search);
-  if (params.get("role")) roleSel.value = params.get("role");
-  if (params.get("q")) send(params.get("q"));
 
   async function send(question) {
     if (!question) return;
@@ -153,12 +201,12 @@
     log.append(el("div", "msg user", question));
     const box = el("div", "msg");
     const steps = el("div", "steps");
-    box.append(el("div", "meta", `rol: ${roleSel.value}`), steps);
+    box.append(el("div", "meta", `${me.user} · rol ${me.role}`), steps);
     log.append(box);
-    box.scrollIntoView({ behavior: "smooth", block: "end" });
 
-    const resp = await fetch("/ask/stream", { method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ question, role: roleSel.value, thread_id: threadId }) });
+    const resp = await fetch("/ask/stream", { method: "POST", headers: auth(),
+      body: JSON.stringify({ question, thread_id: threadId }) });
+    if (!resp.ok) { box.append(el("div", "denied", `Error ${resp.status}`)); return; }
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
@@ -173,13 +221,21 @@
         const data = JSON.parse((chunk.match(/^data: (.*)$/m) || [, "{}"])[1]);
         if (event === "node") steps.append(el("span", "step", data.node));
         else if (event === "answer") renderAnswer(box, data);
-        else if (event === "pending_action") renderPending(box, data);
+        else if (event === "pending_action") {
+          const card = proposalCard(data, "Acción propuesta: crear ticket — requiere aprobación humana");
+          card.append(el("div", "hint", "Queda pendiente para otro usuario con permiso de revisión: no puedes aprobar tu propia solicitud."));
+          box.append(card);
+        }
         else if (event === "action_denied") box.append(el("div", "denied",
           `El rol "${data.role}" no tiene permiso para usar la herramienta ${data.tool}.`));
       }
       box.scrollIntoView({ behavior: "smooth", block: "end" });
     }
+    if (me.reviewer) loadReviews();
   }
+
+  const saved = load("docguard_token");
+  if (saved) login(saved);
 </script>
 </body>
 </html>

@@ -59,3 +59,10 @@ def test_read_only_role_cannot_use_tool(vectorstore, docs):
     result = run(graph, "Crea un ticket por un phishing", role="compliance", thread_id="hr6")
     assert result["action_status"] == "denegada_por_permisos"
     assert result["pending_action"] is None and _tickets() == []
+
+
+def test_graph_blocks_self_approval_even_if_api_is_bypassed(vectorstore):
+    graph = build_graph(Retriever(vectorstore, k=4), FakeAnswerer(PROPOSAL))
+    run(graph, "Crea un ticket por un phishing", role="analista", thread_id="hr7", user="ana")
+    result = review(graph, "hr7", approved=True, reviewer="ana")
+    assert result["action_status"] == "rechazada" and _tickets() == []

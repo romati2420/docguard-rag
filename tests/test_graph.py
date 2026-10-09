@@ -92,3 +92,18 @@ def test_conversation_memory_per_thread(vectorstore):
     ask(graph, "Otra conversación", role="analista", thread_id="t2")
     assert len(fake.calls[1]["history"]) == 1
     assert fake.calls[2]["history"] == []
+
+
+def test_pii_in_retrieved_documents_is_redacted_before_llm(docs):
+    from langchain_community.vectorstores import FAISS
+    from langchain_core.documents import Document
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+
+    docs = docs + [Document("Contacto del gerente: gerente@empresa.cl, RUT 11.111.111-1.",
+                            metadata={"source": "rrhh.md", "page": 1, "allowed_roles": ["analista"]})]
+    vs = FAISS.from_documents(docs, DeterministicFakeEmbedding(size=64))
+    fake = FakeAnswerer(GOOD)
+    ask(build_graph(Retriever(vs, k=5), fake), "¿Contacto del gerente?", role="analista")
+    sent = " ".join(d.page_content for d in fake.calls[0]["docs"])
+    assert "gerente@empresa.cl" not in sent and "11.111.111-1" not in sent
+    assert "[EMAIL REDACTADO]" in sent
