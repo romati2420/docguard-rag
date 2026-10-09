@@ -24,7 +24,7 @@ flowchart LR
     G -- ok --> RET[retrieve<br/>FAISS + filtro ACL<br/>limpieza de injection indirecta]
     RET -- sin fragmentos --> NC[no_context]
     RET --> GEN[generate<br/>Gemini · salida estructurada]
-    GEN --> V{validate<br/>citas literales}
+    GEN --> V{validate<br/>citas vs. fuente}
     V -- citas inválidas<br/>y quedan intentos --> GEN
     V --> F[finalize<br/>calibración + redacción PII]
     F -- propone ticket --> A{authorize_action<br/>permiso de herramienta}
